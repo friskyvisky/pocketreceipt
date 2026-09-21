@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PocketReceipt</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#211D16">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+<style>
+  :root{
+    --paper:#FAF9F4; --paper-shadow:#E7E2D4; --ink:#211D16; --ink-soft:#75705F;
+    --stamp-red:#C1442D; --carbon-purple:#5B5478; --register-teal:#2F6F63; --line:#DAD5C6;
+  }
+  *{box-sizing:border-box;}
+  body{ margin:0; background:var(--paper-shadow); font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    color:var(--ink); display:flex; justify-content:center; padding:24px 12px 60px; min-height:100vh; }
+  .roll{ width:100%; max-width:640px; background:var(--paper); box-shadow:0 8px 30px rgba(0,0,0,0.18); position:relative; }
+  .roll::before, .roll::after{ content:""; display:block; height:14px;
+    background:linear-gradient(-45deg, var(--paper-shadow) 8px, transparent 0),linear-gradient(45deg, var(--paper-shadow) 8px, transparent 0);
+    background-size:16px 16px; }
+  .roll::after{ transform:scaleY(-1); }
+  .inner{ padding:8px 26px 30px; }
+  header{ text-align:center; padding:18px 0 14px; border-bottom:2px dashed var(--line); }
+  .brand{ font-family:'Courier New',monospace; font-weight:700; letter-spacing:3px; font-size:22px; text-transform:uppercase; }
+  .brand span{ color:var(--stamp-red); }
+  .subbrand{ font-family:'Courier New',monospace; font-size:11px; color:var(--ink-soft); letter-spacing:2px; margin-top:4px; }
+  .display{ margin:16px auto 4px; max-width:280px; background:#16241F; color:#8FEFC8; font-family:'Courier New',monospace;
+    font-size:34px; letter-spacing:2px; text-align:right; padding:10px 16px; border-radius:4px; box-shadow:inset 0 0 8px rgba(0,0,0,0.6); }
+  .display-label{ font-family:'Courier New',monospace; font-size:10px; letter-spacing:2px; color:var(--ink-soft); text-align:center; margin-top:2px; }
+  .banner{ display:none; align-items:center; justify-content:space-between; gap:10px; background:#FBEFE9; border:1px solid var(--stamp-red);
+    color:var(--stamp-red); font-size:12.5px; padding:10px 12px; margin:14px 0 0; }
+  .banner button{ background:var(--stamp-red); color:#fff; border:none; font-size:11px; padding:5px 9px; cursor:pointer; white-space:nowrap; font-family:'Courier New',monospace; }
+  .banner .dismiss{ background:none; color:var(--stamp-red); border:none; font-size:15px; cursor:pointer; padding:0 2px; }
+  nav{ display:flex; gap:4px; margin:20px 0 18px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  nav button{ flex:1; min-width:60px; background:none; border:none; font-family:'Courier New',monospace; font-size:11px; letter-spacing:1px;
+    text-transform:uppercase; padding:10px 4px; cursor:pointer; color:var(--ink-soft); border-bottom:3px solid transparent; }
+  nav button.active{ color:var(--ink); border-bottom-color:var(--stamp-red); font-weight:700; }
+  .view{ display:none; animation:fade .25s ease; }
+  .view.active{ display:block; }
+  @keyframes fade{ from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:translateY(0);} }
+  .cat-grid{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .cat-card{ position:relative; background:#fff; border:1px solid var(--line); padding:14px 12px 12px;
+    clip-path:polygon(0 0,100% 0,100% 100%,6px 100%,0 calc(100% - 6px)); }
+  .cat-card .name{ font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--ink-soft); }
+  .cat-card .amt{ font-family:'Courier New',monospace; font-size:22px; font-weight:700; margin-top:4px; }
+  .cat-card .count{ font-size:11px; color:var(--ink-soft); margin-top:2px; }
+  .stamp{ position:absolute; top:8px; right:8px; font-family:'Courier New',monospace; font-size:9px; letter-spacing:1px;
+    color:var(--carbon-purple); border:1px solid var(--carbon-purple); padding:2px 5px; border-radius:3px; transform:rotate(6deg); opacity:0.7; }
+  .empty{ text-align:center; padding:30px 10px; color:var(--ink-soft); font-size:13px; border:1px dashed var(--line); }
+  h2.section-title{ font-family:'Courier New',monospace; font-size:13px; letter-spacing:2px; text-transform:uppercase; color:var(--ink-soft); margin:22px 0 10px; }
+  .card{ background:#fff; border:1px solid var(--line); padding:16px; margin-bottom:16px; }
+  .row{ display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap; }
+  input[type=text], input[type=number], input[type=password], select, textarea{
+    font-family:inherit; font-size:14px; padding:9px 10px; border:1px solid var(--line); background:#FDFCF9; color:var(--ink); width:100%; }
+  textarea{ resize:vertical; min-height:44px; }
+  button.primary{ background:var(--ink); color:#fff; border:none; padding:10px 16px; font-size:13px; letter-spacing:1px;
+    text-transform:uppercase; cursor:pointer; font-family:'Courier New',monospace; }
+  button.primary:hover{ background:var(--stamp-red); }
+  button.ghost{ background:none; border:1px solid var(--line); color:var(--ink-soft); padding:6px 10px; font-size:12px; cursor:pointer; }
+  button.ghost:hover{ border-color:var(--ink); color:var(--ink); }
+  .dropzone{ display:block; border:2px dashed var(--line); text-align:center; padding:28px 14px; cursor:pointer; color:var(--ink-soft); font-size:13px; }
+  .dropzone:hover{ border-color:var(--stamp-red); color:var(--stamp-red); }
+  .visually-hidden-file{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  .item-line{ display:flex; gap:6px; align-items:center; padding:8px 0; border-bottom:1px dotted var(--line); font-size:13px; flex-wrap:wrap; }
+  .item-line input[type=text]{ flex:2; min-width:100px; }
+  .item-line input[type=number]{ flex:1; text-align:right; min-width:70px; }
+  .item-line select{ flex:1.4; min-width:110px; }
+  .history-item{ display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px dotted var(--line); font-size:13px; }
+  .history-item .meta{ color:var(--ink-soft); font-size:11px; }
+  .history-item .price{ font-family:'Courier New',monospace; font-weight:700; }
+  .tag{ display:inline-block; font-size:10px; padding:2px 6px; border-radius:3px; background:#EFEBE0; color:var(--carbon-purple); margin-left:6px; }
+  .tag.ai{ background:#E4ECE9; color:var(--register-teal); }
+  .del{ background:none; border:none; color:var(--ink-soft); cursor:pointer; font-size:15px; margin-left:8px;}
+  .del:hover{ color:var(--stamp-red); }
+  .status{ font-size:12px; color:var(--register-teal); margin-top:6px; min-height:16px; }
+  .status.err{ color:var(--stamp-red); }
+  .hint{ font-size:11px; color:var(--ink-soft); margin-top:6px; }
+  .mode-toggle{ display:flex; gap:8px; margin-bottom:12px; }
+  .mode-toggle label{ flex:1; border:1px solid var(--line); padding:10px; text-align:center; font-size:12px; cursor:pointer; }
+  .mode-toggle input{ display:none; }
+  .mode-toggle input:checked + span{ color:var(--stamp-red); font-weight:700; }
+  #printArea{ display:none; }
+  @media print{
+    body *{ visibility:hidden; }
+    #printArea, #printArea *{ visibility:visible; }
+    #printArea{ display:block; position:absolute; top:0; left:0; width:100%; }
+  }
+</style>
+</head>
+<body>
+<div class="roll">
+  <div class="inner">
+    <header>
+      <div class="brand">Pocket<span>Receipt</span></div>
+      <div class="subbrand">PERSONAL EXPENSE LOG</div>
+      <div class="display" id="grandTotal">₹0.00</div>
+      <div class="display-label">TOTAL LOGGED</div>
+    </header>
+
+    <div id="reminderBanner" class="banner"></div>
+
+    <nav>
+      <button class="tab-btn active" data-view="dashboard">Dashboard</button>
+      <button class="tab-btn" data-view="add">Add</button>
+      <button class="tab-btn" data-view="history">History</button>
+      <button class="tab-btn" data-view="backup">Backup</button>
+      <button class="tab-btn" data-view="settings">Settings</button>
+    </nav>
+
+    <div id="dashboard" class="view active">
+      <h2 class="section-title">Category Totals</h2>
+      <div id="catGrid" class="cat-grid"></div>
+    </div>
+
+    <div id="add" class="view">
+      <h2 class="section-title">Scan a Receipt</h2>
+      <div class="card">
+        <label class="dropzone" for="fileInput">📷 Tap to upload a receipt photo<br><span class="hint">Processed on your device — nothing is uploaded anywhere unless Cloud AI mode is on (see Settings).</span></label>
+        <input type="file" id="fileInput" accept="image/*" class="visually-hidden-file">
+        <div class="status" id="ocrStatus"></div>
+        <div id="ocrResults"></div>
+      </div>
+
+      <h2 class="section-title">Quick Add (no receipt)</h2>
+      <div class="card">
+        <textarea id="quickInput" placeholder="e.g. coffee 60, auto fare 40, notebook 120"></textarea>
+        <div style="margin-top:10px;"><button class="primary" id="parseBtn">Parse Entries</button></div>
+        <div class="status" id="quickStatus"></div>
+        <div id="quickResults"></div>
+      </div>
+    </div>
+
+    <div id="history" class="view">
+      <h2 class="section-title">All Expenses</h2>
+      <div class="card" id="historyList"></div>
+    </div>
+
+    <div id="backup" class="view">
+      <h2 class="section-title">Save a Backup</h2>
+      <div class="card">
+        <p style="font-size:13px; color:var(--ink-soft); margin-top:0;">Download everything as a file you keep on your own device.</p>
+        <button class="primary" id="exportBtn">Download Backup (.json)</button>
+      </div>
+      <h2 class="section-title">Restore a Backup</h2>
+      <div class="card">
+        <p style="font-size:13px; color:var(--ink-soft); margin-top:0;">Upload a previous backup to restore data (merges, never overwrites).</p>
+        <input type="file" id="importFile" accept="application/json">
+        <div class="status" id="importStatus"></div>
+      </div>
+      <h2 class="section-title">Monthly Report</h2>
+      <div class="card">
+        <p style="font-size:13px; color:var(--ink-soft); margin-top:0;">Save a report of everything logged so far, then start the dashboard fresh.</p>
+        <div class="row">
+          <button class="primary" id="printBtn">Print Report</button>
+          <button class="ghost" id="closeMonthBtn">Close Month &amp; Export Report</button>
+        </div>
+        <div class="status" id="monthStatus"></div>
+      </div>
+    </div>
+
+    <div id="settings" class="view">
+      <h2 class="section-title">Categorization Mode</h2>
+      <div class="card">
+        <div class="mode-toggle">
+          <label><input type="radio" name="aiMode" value="keyword"><span>Keyword</span><br><span class="hint">Instant, simplest</span></label>
+          <label><input type="radio" name="aiMode" value="local"><span>Local AI</span><br><span class="hint">Free, private, smarter</span></label>
+          <label><input type="radio" name="aiMode" value="cloud"><span>Cloud AI</span><br><span class="hint">Smartest, needs API key</span></label>
+        </div>
+        <div id="localAiStatus" class="hint"></div>
+        <div id="cloudKeySection" style="display:none; margin-top:10px;">
+          <input type="password" id="geminiKeyInput" placeholder="Paste your Google Gemini API key">
+          <div class="hint">Your key is stored only in this browser and sent directly to Google's API — never through Claude or Anthropic. Get a free key at aistudio.google.com/apikey.</div>
+          <div style="margin-top:8px;"><button class="ghost" id="saveKeyBtn">Save Key</button></div>
+        </div>
+        <div class="status" id="settingsStatus"></div>
+      </div>
+      <h2 class="section-title">About</h2>
+      <div class="card hint">
+        Every expense you log is tagged with which mode categorized it, so you can compare accuracy over time in your History tab.
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="printArea"></div>
+
+<script type="module">
+  // Lazy-loaded on-device embedding model (only downloaded if Local AI mode is actually used)
+  let embedderPromise = null;
+  async function getEmbedder(){
+    if(!embedderPromise){
+      document.getElementById('localAiStatus').textContent = 'Downloading local AI model (one-time, ~25MB)…';
+      const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1');
+      embedderPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+      embedderPromise.then(()=> document.getElementById('localAiStatus').textContent = 'Local AI model ready.');
+    }
+    return embedderPromise;
+  }
+  window.embedText = async function(text){
+    const embedder = await getEmbedder();
+    const out = await embedder(text, { pooling: 'mean', normalize: true });
+    return Array.from(out.data);
+  };
+</script>
+
+<script>
+const DEFAULT_CATEGORIES = ["Food & Dining","Transportation","School","Entertainment/Social","Personal Care","Subscriptions","Miscellaneous","Uncategorized"];
+let expenses = [], classifier = {}, categories = [...DEFAULT_CATEGORIES];
+let localAnchors = {}; // category -> array of embedding vectors (few-shot examples)
+let aiMode = 'keyword';
+let geminiKey = '';
+let lastCloseDate = null, reminderSnoozedUntil = 0;
+
+// ---------- storage (real local browser storage) ----------
+function loadState(){
+  try{ expenses = JSON.parse(localStorage.getItem('pr_expenses')) || []; }catch(e){ expenses = []; }
+  try{ classifier = JSON.parse(localStorage.getItem('pr_classifier')) || {}; }catch(e){ classifier = {}; }
+  try{ categories = JSON.parse(localStorage.getItem('pr_categories')) || [...DEFAULT_CATEGORIES]; }catch(e){ categories = [...DEFAULT_CATEGORIES]; }
+  try{ localAnchors = JSON.parse(localStorage.getItem('pr_anchors')) || {}; }catch(e){ localAnchors = {}; }
+  aiMode = localStorage.getItem('pr_ai_mode') || 'keyword';
+  geminiKey = localStorage.getItem('pr_gemini_key') || '';
+  try{ lastCloseDate = JSON.parse(localStorage.getItem('pr_last_close')); }catch(e){ lastCloseDate = null; }
+  try{ reminderSnoozedUntil = JSON.parse(localStorage.getItem('pr_reminder_snooze')) || 0; }catch(e){ reminderSnoozedUntil = 0; }
+}
+function saveExpenses(){ localStorage.setItem('pr_expenses', JSON.stringify(expenses)); }
+function saveClassifier(){ localStorage.setItem('pr_classifier', JSON.stringify(classifier)); }
+function saveCategories(){ localStorage.setItem('pr_categories', JSON.stringify(categories)); }
+function saveAnchors(){ localStorage.setItem('pr_anchors', JSON.stringify(localAnchors)); }
+
+// ---------- keyword classifier (always-available fallback) ----------
+function tokenize(text){
+  const stop = new Set(["the","and","for","with","from","this","that"]);
+  return (text.toLowerCase().match(/[a-z0-9]+/g) || []).filter(w => w.length>1 && !stop.has(w));
+}
+function classifyKeyword(text){
+  const full = text.toLowerCase().trim();
+  const scores = {};
+  if(classifier[full]) for(const [c,w] of Object.entries(classifier[full])) scores[c]=(scores[c]||0)+w*5;
+  for(const tok of tokenize(text)) if(classifier[tok]) for(const [c,w] of Object.entries(classifier[tok])) scores[c]=(scores[c]||0)+w;
+  let best=null, bestScore=0;
+  for(const [c,s] of Object.entries(scores)) if(s>bestScore){ best=c; bestScore=s; }
+  return best;
+}
+function learnKeyword(text, category){
+  const full = text.toLowerCase().trim();
+  for(const k of [full, ...tokenize(text)]){
+    if(!classifier[k]) classifier[k] = {};
+    classifier[k][category] = (classifier[k][category]||0) + 1;
+  }
+  saveClassifier();
+}
+
+// ---------- local AI (on-device embeddings, few-shot) ----------
+function cosineSim(a,b){ let dot=0; for(let i=0;i<a.length;i++) dot+=a[i]*b[i]; return dot; } // vectors already normalized
+async function classifyLocal(text){
+  const hasAnchors = Object.values(localAnchors).some(arr => arr && arr.length);
+  if(!hasAnchors) return null;
+  const vec = await window.embedText(text);
+  let best=null, bestScore=-1;
+  for(const [cat, vectors] of Object.entries(localAnchors)){
+    for(const v of vectors){
+      const s = cosineSim(vec, v);
+      if(s > bestScore){ bestScore = s; best = cat; }
+    }
+  }
+  return bestScore > 0.35 ? best : null;
+}
+async function learnLocal(text, category){
+  try{
+    const vec = await window.embedText(text);
+    if(!localAnchors[category]) localAnchors[category] = [];
+    localAnchors[category].push(vec);
+    if(localAnchors[category].length > 15) localAnchors[category].shift();
+    saveAnchors();
+  }catch(e){ /* model may not be loaded yet; safe to skip */ }
+}
+
+// ---------- cloud AI (Gemini) ----------
+async function classifyCloud(text){
+  if(!geminiKey) return null;
+  const prompt = `Classify this personal purchase into exactly ONE of these categories, respond with ONLY the category name and nothing else:\n${categories.filter(c=>c!=='Uncategorized').join(', ')}\n\nPurchase: "${text}"`;
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ contents:[{ parts:[{ text: prompt }] }] })
+  });
+  if(!res.ok) throw new Error('Gemini request failed');
+  const data = await res.json();
+  const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+  const match = categories.find(c => c.toLowerCase() === raw.toLowerCase()) ||
+                categories.find(c => raw.toLowerCase().includes(c.toLowerCase()));
+  return match || null;
+}
+
+// ---------- unified classify/learn ----------
+async function classify(text){
+  try{
+    if(aiMode === 'cloud'){ const r = await classifyCloud(text); if(r) return {category:r, mode:'cloud'}; }
+    if(aiMode === 'local'){ const r = await classifyLocal(text); if(r) return {category:r, mode:'local'}; }
+  }catch(e){ console.warn('AI classify failed, falling back to keyword', e); }
+  const r = classifyKeyword(text);
+  return { category: r || 'Uncategorized', mode: r ? 'keyword' : 'none' };
+}
+async function learn(text, category){
+  learnKeyword(text, category);
+  if(aiMode === 'local') learnLocal(text, category);
+}
+
+// ---------- rendering ----------
+function fmt(n){ return "₹" + n.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+function renderGrandTotal(){ document.getElementById('grandTotal').textContent = fmt(expenses.reduce((s,e)=>s+e.price,0)); }
+function renderDashboard(){
+  const grid = document.getElementById('catGrid');
+  const totals={}, counts={};
+  for(const e of expenses){ totals[e.category]=(totals[e.category]||0)+e.price; counts[e.category]=(counts[e.category]||0)+1; }
+  const cats = Object.keys(totals);
+  if(cats.length===0){ grid.innerHTML = '<div class="empty" style="grid-column:1/-1">No expenses logged yet.</div>'; return; }
+  cats.sort((a,b)=>totals[b]-totals[a]);
+  grid.innerHTML = cats.map(c => `<div class="cat-card"><div class="stamp">${counts[c]} item${counts[c]!==1?'s':''}</div><div class="name">${c}</div><div class="amt">${fmt(totals[c])}</div></div>`).join('');
+}
+function categoryOptions(selected){ return categories.map(c => `<option value="${c}" ${c===selected?'selected':''}>${c}</option>`).join(''); }
+function renderHistory(){
+  const list = document.getElementById('historyList');
+  if(expenses.length===0){ list.innerHTML = '<div class="empty">Nothing logged yet.</div>'; return; }
+  const sorted = [...expenses].sort((a,b)=> b.createdAt - a.createdAt);
+  list.innerHTML = sorted.map(e => `
+    <div class="history-item" data-id="${e.id}">
+      <div>
+        <div>${e.name}<span class="tag">${e.category}</span>${e.aiMode ? `<span class="tag ai">${e.aiMode}</span>` : ''}</div>
+        <div class="meta">${new Date(e.createdAt).toLocaleDateString()} · ${e.source}</div>
+      </div>
+      <div style="display:flex;align-items:center;">
+        <span class="price">${fmt(e.price)}</span>
+        <button class="del" data-del="${e.id}" title="Delete">✕</button>
+      </div>
+    </div>`).join('');
+  list.querySelectorAll('[data-del]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{ expenses = expenses.filter(e=>e.id!==btn.getAttribute('data-del')); saveExpenses(); renderAll(); });
+  });
+}
+function renderReminder(){
+  const el = document.getElementById('reminderBanner');
+  if(expenses.length===0 || Date.now() < reminderSnoozedUntil){ el.style.display='none'; return; }
+  const now = new Date();
+  const anchor = lastCloseDate ? new Date(lastCloseDate) : new Date(Math.min(...expenses.map(e=>e.createdAt)));
+  const sameMonth = anchor.getFullYear()===now.getFullYear() && anchor.getMonth()===now.getMonth();
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+  const daysLeft = daysInMonth - now.getDate();
+  let message = null;
+  if(!sameMonth) message = `${now.toLocaleString('en-IN',{month:'long'})} has started — want to close out ${anchor.toLocaleString('en-IN',{month:'long'})}'s log?`;
+  else if(daysLeft<=3) message = daysLeft===0 ? `Last day of ${now.toLocaleString('en-IN',{month:'long'})} — good time to close out.` : `${daysLeft} day(s) left in ${now.toLocaleString('en-IN',{month:'long'})} — you might want to close out soon.`;
+  if(!message){ el.style.display='none'; return; }
+  el.style.display='flex';
+  el.innerHTML = `<span>${message}</span><span style="display:flex;gap:6px;align-items:center;"><button id="reminderGoBtn">Close Month</button><button class="dismiss" id="reminderDismissBtn">✕</button></span>`;
+  document.getElementById('reminderGoBtn').addEventListener('click', ()=>{ switchTab('backup'); });
+  document.getElementById('reminderDismissBtn').addEventListener('click', ()=>{ reminderSnoozedUntil = Date.now()+3*86400000; localStorage.setItem('pr_reminder_snooze', JSON.stringify(reminderSnoozedUntil)); renderReminder(); });
+}
+function renderAll(){ renderGrandTotal(); renderDashboard(); renderHistory(); renderReminder(); }
+
+function switchTab(view){
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+  document.querySelector(`[data-view="${view}"]`).classList.add('active');
+  document.getElementById(view).classList.add('active');
+}
+document.querySelectorAll('.tab-btn').forEach(btn=> btn.addEventListener('click', ()=> switchTab(btn.dataset.view)));
+
+// ---------- quick add ----------
+document.getElementById('parseBtn').addEventListener('click', async ()=>{
+  const raw = document.getElementById('quickInput').value.trim();
+  const statusEl = document.getElementById('quickStatus');
+  if(!raw){ statusEl.textContent="Type something first."; statusEl.className="status err"; return; }
+  const parts = raw.split(',').map(s=>s.trim()).filter(Boolean);
+  const priceRe = /(\d+(?:\.\d{1,2})?)\s*$/;
+  const parsed = [];
+  for(const part of parts){
+    const m = part.match(priceRe); if(!m) continue;
+    const price = parseFloat(m[1]);
+    const name = part.slice(0,m.index).trim().replace(/[\$#₹]|rs\.?/gi,'').trim() || "Item";
+    const {category, mode} = await classify(name);
+    parsed.push({ name, price, category, aiMode: mode });
+  }
+  if(parsed.length===0){ statusEl.textContent="Couldn't find any 'item price' pairs."; statusEl.className="status err"; return; }
+  statusEl.textContent = `Found ${parsed.length} item(s). Review and confirm.`; statusEl.className="status";
+  renderEditableResults('quickResults', parsed, 'manual');
+});
+
+// ---------- OCR ----------
+document.getElementById('fileInput').addEventListener('change', async (ev)=>{
+  const file = ev.target.files[0]; if(!file) return;
+  const statusEl = document.getElementById('ocrStatus');
+  document.getElementById('ocrResults').innerHTML='';
+  statusEl.className="status"; statusEl.textContent="Reading receipt… (10-30s)";
+  try{
+    const { data } = await Tesseract.recognize(file, 'eng', { logger:m=>{ if(m.status && m.progress!=null) statusEl.textContent = `${m.status}… ${Math.round(m.progress*100)}%`; } });
+    const lines = data.text.split('\n').map(l=>l.trim()).filter(Boolean);
+    const STOP_RE = /\b(no of item|total qty|total\b|gross\b|saved\b|discount\b|received\b|cess\b|customer|s\.?man|ro-|balance\b)/i;
+    const rawItems = [];
+    for(const line of lines){
+      if(STOP_RE.test(line)) break;
+      const nums = line.match(/\d{1,6}\.\d{2}/g);
+      if(!nums || nums.length===0) continue;
+      const price = parseFloat(nums[nums.length-1]);
+      if(!(price>0 && price<200000)) continue;
+      let name = line.replace(/\d+(\.\d+)?/g,' ').replace(/[^a-zA-Z\s]/g,' ').replace(/\s{2,}/g,' ').trim();
+      if(!name || name.length<2) name = "Item";
+      rawItems.push({name, price});
+    }
+    if(rawItems.length===0){ statusEl.textContent="Couldn't detect line items — try a clearer photo or Quick Add."; statusEl.className="status err"; return; }
+    statusEl.textContent = `Detected ${rawItems.length} item(s). Categorizing…`;
+    const parsed = [];
+    for(const it of rawItems){ const {category, mode} = await classify(it.name); parsed.push({...it, category, aiMode: mode}); }
+    statusEl.textContent = `Detected ${parsed.length} item(s). Review before adding.`;
+    renderEditableResults('ocrResults', parsed, 'receipt');
+  }catch(err){ console.error(err); statusEl.textContent="Something went wrong reading that image."; statusEl.className="status err"; }
+});
+
+function renderEditableResults(containerId, items, source){
+  const container = document.getElementById(containerId);
+  container.innerHTML = items.map((it,i)=>`
+    <div class="item-line" data-idx="${i}">
+      <input type="text" class="f-name" value="${it.name.replace(/"/g,'&quot;')}">
+      <input type="number" class="f-price" value="${it.price}" step="0.01">
+      <select class="f-cat">${categoryOptions(it.category)}</select>
+    </div>`).join('') + `<div style="margin-top:12px;"><button class="primary confirm-add">Add All</button></div>`;
+  container.querySelector('.confirm-add').addEventListener('click', async ()=>{
+    const lines = container.querySelectorAll('.item-line');
+    let count=0;
+    for(const line of lines){
+      const name = line.querySelector('.f-name').value.trim();
+      const price = parseFloat(line.querySelector('.f-price').value);
+      const category = line.querySelector('.f-cat').value;
+      if(!name || isNaN(price)) continue;
+      expenses.push({ id: crypto.randomUUID(), name, price, category, source, aiMode, createdAt: Date.now() });
+      await learn(name, category);
+      count++;
+    }
+    saveExpenses();
+    container.innerHTML = `<div class="status">Added ${count} expense(s).</div>`;
+    if(containerId==='quickResults') document.getElementById('quickInput').value='';
+    renderAll();
+  });
+}
+
+// ---------- backup ----------
+function downloadFile(filename, content, mime){
+  const blob = new Blob([content],{type:mime}); const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+document.getElementById('exportBtn').addEventListener('click', ()=>{
+  const backup = { expenses, classifier, categories, localAnchors, exportedAt:new Date().toISOString() };
+  downloadFile(`pocketreceipt-backup-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(backup,null,2), 'application/json');
+});
+document.getElementById('importFile').addEventListener('change', async (ev)=>{
+  const file = ev.target.files[0]; const statusEl = document.getElementById('importStatus'); if(!file) return;
+  try{
+    const data = JSON.parse(await file.text());
+    if(!Array.isArray(data.expenses)) throw new Error('bad file');
+    const existingIds = new Set(expenses.map(e=>e.id)); let added=0;
+    for(const e of data.expenses) if(!existingIds.has(e.id)){ expenses.push(e); added++; }
+    if(data.classifier) for(const [k,v] of Object.entries(data.classifier)){ classifier[k]=classifier[k]||{}; for(const [c,w] of Object.entries(v)) classifier[k][c]=(classifier[k][c]||0)+w; }
+    if(Array.isArray(data.categories)) for(const c of data.categories) if(!categories.includes(c)) categories.push(c);
+    if(data.localAnchors) for(const [c,vecs] of Object.entries(data.localAnchors)){ localAnchors[c]=(localAnchors[c]||[]).concat(vecs).slice(-15); }
+    saveExpenses(); saveClassifier(); saveCategories(); saveAnchors();
+    statusEl.className="status"; statusEl.textContent = `Restored ${added} expense(s).`;
+    renderAll();
+  }catch(e){ statusEl.className="status err"; statusEl.textContent="Couldn't read that file."; }
+});
+
+function monthLabel(){ return new Date().toLocaleString('en-IN',{month:'long',year:'numeric'}); }
+function buildReportHTML(list, label){
+  const totals={}; let grand=0;
+  for(const e of list){ totals[e.category]=(totals[e.category]||0)+e.price; grand+=e.price; }
+  const cats = Object.keys(totals).sort((a,b)=>totals[b]-totals[a]);
+  const rows = list.slice().sort((a,b)=>a.createdAt-b.createdAt).map(e=>`<tr><td>${new Date(e.createdAt).toLocaleDateString('en-IN')}</td><td>${e.name}</td><td>${e.category}</td><td style="text-align:right">${fmt(e.price)}</td></tr>`).join('');
+  const catRows = cats.map(c=>`<tr><td>${c}</td><td style="text-align:right">${fmt(totals[c])}</td></tr>`).join('');
+  return `<div style="font-family:'Courier New',monospace;max-width:640px;margin:20px auto;padding:20px;">
+    <h1 style="text-align:center;">PocketReceipt — ${label}</h1>
+    <h3>Category Totals</h3><table style="width:100%;border-collapse:collapse;">${catRows}</table>
+    <h3 style="margin-top:20px;">Grand Total: ${fmt(grand)}</h3>
+    <h3 style="margin-top:30px;">All Entries</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;"><tr><th style="text-align:left">Date</th><th style="text-align:left">Item</th><th style="text-align:left">Category</th><th style="text-align:right">Price</th></tr>${rows}</table></div>`;
+}
+document.getElementById('printBtn').addEventListener('click', ()=>{ document.getElementById('printArea').innerHTML = buildReportHTML(expenses, monthLabel()); window.print(); });
+document.getElementById('closeMonthBtn').addEventListener('click', ()=>{
+  const statusEl = document.getElementById('monthStatus');
+  if(expenses.length===0){ statusEl.className="status err"; statusEl.textContent="Nothing to close out."; return; }
+  const label = monthLabel();
+  const reportHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>PocketReceipt ${label}</title></head><body>${buildReportHTML(expenses,label)}</body></html>`;
+  downloadFile(`pocketreceipt-report-${label.replace(' ','-')}.html`, reportHtml, 'text/html');
+  expenses = []; saveExpenses();
+  lastCloseDate = Date.now(); localStorage.setItem('pr_last_close', JSON.stringify(lastCloseDate));
+  statusEl.className="status"; statusEl.textContent = `Report saved for ${label}. Dashboard reset.`;
+  renderAll();
+});
+
+// ---------- settings ----------
+function initSettingsUI(){
+  document.querySelectorAll('input[name=aiMode]').forEach(r=>{
+    r.checked = (r.value === aiMode);
+    r.addEventListener('change', ()=>{
+      aiMode = r.value; localStorage.setItem('pr_ai_mode', aiMode);
+      document.getElementById('cloudKeySection').style.display = aiMode==='cloud' ? 'block' : 'none';
+      document.getElementById('settingsStatus').textContent = `Mode set to ${aiMode}.`;
+      if(aiMode==='local') getEmbedderWarm();
+    });
+  });
+  document.getElementById('cloudKeySection').style.display = aiMode==='cloud' ? 'block' : 'none';
+  document.getElementById('geminiKeyInput').value = geminiKey;
+  document.getElementById('saveKeyBtn').addEventListener('click', ()=>{
+    geminiKey = document.getElementById('geminiKeyInput').value.trim();
+    localStorage.setItem('pr_gemini_key', geminiKey);
+    document.getElementById('settingsStatus').textContent = 'Gemini key saved locally.';
+  });
+}
+function getEmbedderWarm(){ window.embedText('warm up').catch(()=>{}); }
+
+// ---------- init ----------
+loadState();
+initSettingsUI();
+renderAll();
+
+// ---------- PWA install support ----------
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=> navigator.serviceWorker.register('service-worker.js').catch(()=>{}));
+}
+</script>
+</body>
+</html>
