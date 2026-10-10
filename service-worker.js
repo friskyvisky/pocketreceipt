@@ -1,4 +1,5 @@
-const CACHE_NAME = 'pocketreceipt-v1';
+// Bump this number whenever you want to force every device to drop its old saved copy.
+const CACHE_NAME = 'pocketreceipt-v2';
 const SHELL_FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -17,10 +18,21 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
+// Network-first for the app's own files: you always get the latest version when online,
+// and the saved copy is only used when the network isn't available (offline use).
+// Files from other sites (CDN scripts, AI model downloads) are left to the browser.
 self.addEventListener('fetch', (event) => {
-  // network-first for API calls (Gemini), cache-first for the app shell itself
-  if (event.request.url.includes('generativelanguage.googleapis.com')) return;
+  const req = event.request;
+  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
   event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
+    fetch(req)
+      .then((res) => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy)).catch(()=>{});
+        }
+        return res;
+      })
+      .catch(() => caches.match(req).then((cached) => cached || caches.match('./index.html')))
   );
 });
