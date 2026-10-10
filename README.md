@@ -12,10 +12,11 @@ A personal expense tracker that scans receipts and categorizes spending automati
 
 ## Tech
 
-- Vanilla HTML/CSS/JavaScript — no framework overhead
-- Service worker for offline support and caching
-- Gemini API for receipt OCR
-- Local storage for on-device data persistence
+- Vanilla HTML/CSS/JavaScript, no framework
+- Tesseract.js for on-device receipt OCR
+- Transformers.js (all-MiniLM-L6-v2) for on-device AI categorization, with keyword matching as a fallback
+- Service worker so the app can be installed and its pages load offline
+- Browser local storage for on-device data
 
 ## Why I built this
 
