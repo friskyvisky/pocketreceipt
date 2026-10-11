@@ -6,7 +6,7 @@ A personal expense tracker that scans receipts and categorizes spending automati
 
 - Scans receipts using OCR to extract purchase details automatically
 - Uses a self-learning classifier to categorize expenses over time — the more you use it, the smarter it gets at sorting your spending
-- Works fully offline as an installable app (PWA) — install it to your home screen like a native app
+- Installable as an app (PWA). The OCR and AI models download once on first use.
 - Built with INR formatting for everyday use in India
 - Keeps data local and private — nothing is stored on a server you don't control
 

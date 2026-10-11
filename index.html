@@ -79,6 +79,10 @@
   .status{ font-size:12px; color:var(--register-teal); margin-top:6px; min-height:16px; }
   .status.err{ color:var(--stamp-red); }
   .hint{ font-size:11px; color:var(--ink-soft); margin-top:6px; }
+  .dup-note{ flex-basis:100%; font-size:12px; color:var(--stamp-red); padding:2px 0 6px; }
+  .dup-note label{ margin-left:8px; cursor:pointer; color:var(--ink); }
+  .item-line .del{ margin-left:0; }
+  .history-item.editing{ display:block; }
   #printArea{ display:none; }
   @media print{
     body *{ visibility:hidden; }
@@ -285,6 +289,31 @@ async function learn(text, category){
   learnLocal(text, category);
 }
 
+// ---------- helpers ----------
+// Makes text safe to drop into HTML (so a name like "A<B" can't break the page).
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// Cleans a receipt line down to an item name. Prices, codes and stray numbers are dropped,
+// but quantities with a unit (500 ML, 1 KG, 400 G) are kept in their original position.
+// Prices look like 110.00 (two decimals) so they never count as quantities.
+function cleanItemName(line){
+  const cleaned = line.replace(
+    /(\d+(?:\.\d)?)(?!\d)\s*(litre|liter|ltr|ml|kg|gm|pcs|pc|pack|l|g)\b|\d+(?:\.\d+)?|[^a-zA-Z\s]/gi,
+    (m, n, u) => u ? ` ${n}${u.toUpperCase()} ` : ' ');
+  return cleaned.replace(/\s{2,}/g,' ').trim();
+}
+
+// Cleans the name part of a Quick Add entry: removes currency marks and trailing dashes/colons.
+function cleanQuickName(s){
+  return s.replace(/[\$#₹]|\brs\.?/gi,'').replace(/[\s\-–—:=@,]+$/,'').trim() || "Item";
+}
+
+// True if an expense with the same name and price was already logged today.
+function isDuplicateToday(name, price){
+  const key = name.trim().toLowerCase(), today = new Date().toDateString();
+  return expenses.some(e => e.name.trim().toLowerCase()===key && Math.abs(e.price-price)<0.005 && new Date(e.createdAt).toDateString()===today);
+}
+
 // ---------- rendering ----------
 function fmt(n){ return "₹" + n.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2}); }
 function renderGrandTotal(){ document.getElementById('grandTotal').textContent = fmt(expenses.reduce((s,e)=>s+e.price,0)); }
@@ -295,27 +324,65 @@ function renderDashboard(){
   const cats = Object.keys(totals);
   if(cats.length===0){ grid.innerHTML = '<div class="empty" style="grid-column:1/-1">No expenses logged yet.</div>'; return; }
   cats.sort((a,b)=>totals[b]-totals[a]);
-  grid.innerHTML = cats.map(c => `<div class="cat-card"><div class="stamp">${counts[c]} item${counts[c]!==1?'s':''}</div><div class="name">${c}</div><div class="amt">${fmt(totals[c])}</div></div>`).join('');
+  grid.innerHTML = cats.map(c => `<div class="cat-card"><div class="stamp">${counts[c]} item${counts[c]!==1?'s':''}</div><div class="name">${esc(c)}</div><div class="amt">${fmt(totals[c])}</div></div>`).join('');
 }
-function categoryOptions(selected){ return categories.map(c => `<option value="${c}" ${c===selected?'selected':''}>${c}</option>`).join(''); }
+function categoryOptions(selected){ return categories.map(c => `<option value="${esc(c)}" ${c===selected?'selected':''}>${esc(c)}</option>`).join(''); }
+let editingId = null; // id of the History entry currently being edited, if any
 function renderHistory(){
   const list = document.getElementById('historyList');
   if(expenses.length===0){ list.innerHTML = '<div class="empty">Nothing logged yet.</div>'; return; }
   const sorted = [...expenses].sort((a,b)=> b.createdAt - a.createdAt);
-  list.innerHTML = sorted.map(e => `
+  list.innerHTML = sorted.map(e => e.id===editingId ? `
+    <div class="history-item editing" data-id="${e.id}">
+      <div class="item-line" style="width:100%; border:none; padding:0;">
+        <input type="text" class="h-name" value="${esc(e.name)}">
+        <input type="number" class="h-price" value="${e.price}" step="0.01">
+        <select class="h-cat">${categoryOptions(e.category)}</select>
+        <button class="primary h-save" type="button">Save</button>
+        <button class="ghost h-cancel" type="button">Cancel</button>
+        <div class="status err h-err" style="flex-basis:100%;"></div>
+      </div>
+    </div>` : `
     <div class="history-item" data-id="${e.id}">
       <div>
-        <div>${e.name}<span class="tag">${e.category}</span>${e.aiMode ? `<span class="tag ai">${e.aiMode}</span>` : ''}</div>
-        <div class="meta">${new Date(e.createdAt).toLocaleDateString()} · ${e.source}</div>
+        <div>${esc(e.name)}<span class="tag">${esc(e.category)}</span>${e.aiMode ? `<span class="tag ai">${esc(e.aiMode)}</span>` : ''}</div>
+        <div class="meta">${new Date(e.createdAt).toLocaleDateString()} · ${esc(e.source)}</div>
       </div>
       <div style="display:flex;align-items:center;">
         <span class="price">${fmt(e.price)}</span>
+        <button class="del" data-edit="${e.id}" title="Edit">✎</button>
         <button class="del" data-del="${e.id}" title="Delete">✕</button>
       </div>
     </div>`).join('');
   list.querySelectorAll('[data-del]').forEach(btn=>{
-    btn.addEventListener('click', ()=>{ expenses = expenses.filter(e=>e.id!==btn.getAttribute('data-del')); saveExpenses(); renderAll(); });
+    btn.addEventListener('click', ()=>{
+      const id = btn.getAttribute('data-del');
+      if(editingId===id) editingId = null;
+      expenses = expenses.filter(e=>e.id!==id); saveExpenses(); renderAll();
+    });
   });
+  list.querySelectorAll('[data-edit]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{ editingId = btn.getAttribute('data-edit'); renderHistory(); });
+  });
+  const row = list.querySelector('.history-item.editing');
+  if(row){
+    row.querySelector('.h-cancel').addEventListener('click', ()=>{ editingId = null; renderHistory(); });
+    row.querySelector('.h-save').addEventListener('click', async ()=>{
+      const name = row.querySelector('.h-name').value.trim();
+      const price = parseFloat(row.querySelector('.h-price').value);
+      const category = row.querySelector('.h-cat').value;
+      const err = row.querySelector('.h-err');
+      if(!name){ err.textContent = "Name can't be empty."; return; }
+      if(!isFinite(price) || price<0){ err.textContent = 'Enter a valid price.'; return; }
+      const entry = expenses.find(x=>x.id===editingId);
+      if(!entry){ editingId = null; renderAll(); return; }
+      const changed = entry.name!==name || entry.category!==category;
+      entry.name = name; entry.price = price; entry.category = category;
+      saveExpenses(); editingId = null;
+      if(changed) await learn(name, category); // corrections teach the categorizer
+      renderAll();
+    });
+  }
 }
 function renderReminder(){
   const el = document.getElementById('reminderBanner');
@@ -355,7 +422,7 @@ document.getElementById('parseBtn').addEventListener('click', async ()=>{
   for(const part of parts){
     const m = part.match(priceRe); if(!m) continue;
     const price = parseFloat(m[1]);
-    const name = part.slice(0,m.index).trim().replace(/[\$#₹]|rs\.?/gi,'').trim() || "Item";
+    const name = cleanQuickName(part.slice(0,m.index));
     const {category, mode} = await classify(name);
     parsed.push({ name, price, category, aiMode: mode });
   }
@@ -381,7 +448,7 @@ document.getElementById('fileInput').addEventListener('change', async (ev)=>{
       if(!nums || nums.length===0) continue;
       const price = parseFloat(nums[nums.length-1]);
       if(!(price>0 && price<200000)) continue;
-      let name = line.replace(/\d+(\.\d+)?/g,' ').replace(/[^a-zA-Z\s]/g,' ').replace(/\s{2,}/g,' ').trim();
+      let name = cleanItemName(line);
       if(!name || name.length<2) name = "Item";
       rawItems.push({name, price});
     }
@@ -398,12 +465,43 @@ function renderEditableResults(containerId, items, source){
   const container = document.getElementById(containerId);
   container.innerHTML = items.map((it,i)=>`
     <div class="item-line" data-idx="${i}">
-      <input type="text" class="f-name" value="${it.name.replace(/"/g,'&quot;')}">
+      <input type="text" class="f-name" value="${esc(it.name)}">
       <input type="number" class="f-price" value="${it.price}" step="0.01">
       <select class="f-cat">${categoryOptions(it.category)}</select>
-    </div>`).join('') + `<div style="margin-top:12px;"><button class="primary confirm-add">Add All</button></div>`;
-  container.querySelector('.confirm-add').addEventListener('click', async ()=>{
+      <button class="del rm-row" type="button" title="Remove this row">✕</button>
+      <div class="dup-note" style="display:none;">⚠ Already logged today. <label><input type="checkbox" class="f-anyway"> add anyway</label></div>
+    </div>`).join('') + `<div style="margin-top:12px;"><button class="primary confirm-add">Add All</button></div><div class="status add-status"></div>`;
+
+  // Marks rows that match something already logged today; returns how many still need a decision.
+  const refreshDupFlags = () => {
+    let unresolved = 0;
+    container.querySelectorAll('.item-line').forEach(line=>{
+      const name = line.querySelector('.f-name').value.trim();
+      const price = parseFloat(line.querySelector('.f-price').value);
+      const anyway = line.querySelector('.f-anyway');
+      const dup = !!name && !isNaN(price) && isDuplicateToday(name, price);
+      line.querySelector('.dup-note').style.display = dup ? 'block' : 'none';
+      if(!dup) anyway.checked = false;
+      if(dup && !anyway.checked) unresolved++;
+    });
+    return unresolved;
+  };
+  refreshDupFlags();
+  container.querySelectorAll('.f-name, .f-price').forEach(inp => inp.addEventListener('input', refreshDupFlags));
+  container.querySelectorAll('.rm-row').forEach(btn => btn.addEventListener('click', ()=>{ btn.closest('.item-line').remove(); refreshDupFlags(); }));
+
+  const addBtn = container.querySelector('.confirm-add');
+  addBtn.addEventListener('click', async ()=>{
+    const statusEl = container.querySelector('.add-status');
     const lines = container.querySelectorAll('.item-line');
+    if(lines.length===0){ statusEl.className='status err'; statusEl.textContent='No rows left to add.'; return; }
+    const unresolved = refreshDupFlags();
+    if(unresolved>0){
+      statusEl.className='status err';
+      statusEl.textContent = `${unresolved} item(s) look like duplicates of ones already logged today. Tick "add anyway" or remove them with ✕, then click Add All again.`;
+      return;
+    }
+    addBtn.disabled = true; // stops a double-click from adding everything twice
     let count=0;
     for(const line of lines){
       const name = line.querySelector('.f-name').value.trim();
@@ -453,8 +551,8 @@ function buildReportHTML(list, label){
   const totals={}; let grand=0;
   for(const e of list){ totals[e.category]=(totals[e.category]||0)+e.price; grand+=e.price; }
   const cats = Object.keys(totals).sort((a,b)=>totals[b]-totals[a]);
-  const rows = list.slice().sort((a,b)=>a.createdAt-b.createdAt).map(e=>`<tr><td>${new Date(e.createdAt).toLocaleDateString('en-IN')}</td><td>${e.name}</td><td>${e.category}</td><td style="text-align:right">${fmt(e.price)}</td></tr>`).join('');
-  const catRows = cats.map(c=>`<tr><td>${c}</td><td style="text-align:right">${fmt(totals[c])}</td></tr>`).join('');
+  const rows = list.slice().sort((a,b)=>a.createdAt-b.createdAt).map(e=>`<tr><td>${new Date(e.createdAt).toLocaleDateString('en-IN')}</td><td>${esc(e.name)}</td><td>${esc(e.category)}</td><td style="text-align:right">${fmt(e.price)}</td></tr>`).join('');
+  const catRows = cats.map(c=>`<tr><td>${esc(c)}</td><td style="text-align:right">${fmt(totals[c])}</td></tr>`).join('');
   return `<div style="font-family:'Courier New',monospace;max-width:640px;margin:20px auto;padding:20px;">
     <h1 style="text-align:center;">PocketReceipt — ${label}</h1>
     <h3>Category Totals</h3><table style="width:100%;border-collapse:collapse;">${catRows}</table>
@@ -462,7 +560,14 @@ function buildReportHTML(list, label){
     <h3 style="margin-top:30px;">All Entries</h3>
     <table style="width:100%;border-collapse:collapse;font-size:12px;"><tr><th style="text-align:left">Date</th><th style="text-align:left">Item</th><th style="text-align:left">Category</th><th style="text-align:right">Price</th></tr>${rows}</table></div>`;
 }
-document.getElementById('printBtn').addEventListener('click', ()=>{ document.getElementById('printArea').innerHTML = buildReportHTML(expenses, monthLabel()); window.print(); });
+document.getElementById('printBtn').addEventListener('click', ()=>{
+  document.getElementById('printArea').innerHTML = buildReportHTML(expenses, monthLabel());
+  // The browser proposes the page title as the PDF filename, so set a useful one while printing.
+  const oldTitle = document.title;
+  document.title = `PocketReceipt-${monthLabel().replace(' ','-')}`;
+  window.addEventListener('afterprint', ()=>{ document.title = oldTitle; }, { once:true });
+  window.print();
+});
 document.getElementById('closeMonthBtn').addEventListener('click', ()=>{
   const statusEl = document.getElementById('monthStatus');
   if(expenses.length===0){ statusEl.className="status err"; statusEl.textContent="Nothing to close out."; return; }
