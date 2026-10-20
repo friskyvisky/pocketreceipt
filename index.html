@@ -123,6 +123,7 @@
         <input type="file" id="fileInput" accept="image/*" class="visually-hidden-file">
         <div class="status" id="ocrStatus"></div>
         <div id="ocrResults"></div>
+        <details class="hint" style="margin-top:10px"><summary>Show raw scan text</summary><pre id="ocrRaw" style="white-space:pre-wrap;font-size:12px;overflow-x:auto"></pre></details>
       </div>
 
       <h2 class="section-title">Quick Add (no receipt)</h2>
@@ -432,31 +433,259 @@ document.getElementById('parseBtn').addEventListener('click', async ()=>{
 });
 
 // ---------- OCR ----------
+// Step 1: clean up the photo before Tesseract sees it (greyscale + contrast stretch + sensible size).
+// If anything goes wrong (old browser, odd file) we quietly fall back to the original photo.
+async function preprocessReceiptImage(file){
+  try{
+    const bmp = await createImageBitmap(file);
+    const longest = Math.max(bmp.width, bmp.height);
+    // Small photos are enlarged (up to 2x), giant ones are shrunk: faster and easier to read.
+    let scale = 1;
+    if(longest < 1600) scale = Math.min(2, 1800/longest);
+    else if(longest > 2800) scale = 2800/longest;
+    const w = Math.round(bmp.width*scale), h = Math.round(bmp.height*scale);
+    const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently:true });
+    ctx.drawImage(bmp, 0, 0, w, h);
+    const img = ctx.getImageData(0, 0, w, h), px = img.data;
+    const hist = new Uint32Array(256);
+    for(let i=0; i<px.length; i+=4){
+      const g = Math.round(0.299*px[i] + 0.587*px[i+1] + 0.114*px[i+2]);
+      px[i] = px[i+1] = px[i+2] = g; hist[g]++;
+    }
+    // Contrast stretch. The darkest and brightest 0.1% are ignored so one shadow or glare spot can't flatten the rest.
+    const total = w*h; let lo = 0, hi = 255, acc = 0;
+    for(let v=0; v<256; v++){ acc += hist[v]; if(acc >= total*0.001){ lo = v; break; } }
+    acc = 0;
+    for(let v=255; v>=0; v--){ acc += hist[v]; if(acc >= total*0.001){ hi = v; break; } }
+    if(hi - lo > 30){
+      const range = hi - lo;
+      for(let i=0; i<px.length; i+=4){
+        const v = Math.max(0, Math.min(255, Math.round((px[i]-lo)*255/range)));
+        px[i] = px[i+1] = px[i+2] = v;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    if(bmp.close) bmp.close();
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+    return blob || file;
+  }catch(e){ console.warn('Image cleanup skipped', e); return file; }
+}
+
+// Step 2: finding money amounts in a line of OCR text.
+// Understands: 110.00  110,00  1,245.00  12.5  841.  Rs.110  Rs 110  ₹110  110.00/-  24.00T  and OCR slips like 11O.00.
+// Weights like 0.315 are kept separately (wt:true) so qty x rate checks can use them, but they are never prices.
+// "500ML" and dates are not amounts.
+function fixDigitLookalikes(tok){
+  if(/^[\dOo.,]+$/.test(tok) && /\d/.test(tok)) return tok.replace(/[Oo]/g, '0');
+  if(/^[\dlI|.,]{3,}$/.test(tok) && /\d\d/.test(tok)) return tok.replace(/[lI|]/g, '1');
+  return tok;
+}
+function amountsInLine(line){
+  // glue decimals that OCR split apart: "110 .00" / "110. 00"  ->  "110.00"
+  const s = line.replace(/(\d)\s+([.,])\s*(\d{2})(?!\d)/g, '$1$2$3').replace(/(\d[.,])\s+(\d{2})(?!\d)/g, '$1$2');
+  const toks = s.split(/\s+/).filter(Boolean);
+  const out = []; out.toks = toks;
+  let curPending = false;
+  toks.forEach((raw, i) => {
+    // OCR often glues stray marks onto numbers:  38.00"   [0.00]   ~
+    let t = raw.replace(/^[\[("'`~|]+/, '').replace(/[\])"'`~|;:]+$/, '');
+    t = fixDigitLookalikes(t);
+    if(/^(₹|rs\.?|inr)$/i.test(t)){ curPending = true; return; }
+    const wasCur = curPending; curPending = false;
+    if(/^\d{1,3}\.\d{3}$/.test(t)){ out.push({ v: parseFloat(t), dec:false, cur:false, wt:true, dd:3, idx:i, last: i === toks.length-1 }); return; }
+    const m = t.match(/^(?:(₹|rs\.?|inr))?(\d{1,3}(?:,\d{3})+|\d+)(?:[.,](\d{1,2})?)?([*\/\-]{0,2})([A-Za-z]?)$/i);
+    if(!m) return;
+    const hasDec = m[3] !== undefined;
+    const cur = wasCur || !!m[1];
+    if(m[5] && !hasDec && !cur) return;                    // "5G", "2L" are quantities, not money
+    const v = parseFloat(m[2].replace(/,/g, '') + (hasDec ? '.' + m[3] : ''));
+    if(!isFinite(v)) return;
+    out.push({ v, dec: hasDec, cur, wt:false, dd: hasDec ? m[3].length : 0, idx: i, last: i === toks.length - 1 });
+  });
+  return out;
+}
+
+// Picks which amount on a line is the line total. Returns {v, idx, est?, rep?} or null.
+//  - Normal pass: only amounts with decimals (or a ₹/Rs sign) count, so quantities and codes are ignored.
+//  - If a line looks like  qty x rate = amount, the amount wins even when other columns sit to its right.
+//    If the amount lost its last digit (9.8 where 0.145 x 68 = 9.86) it is repaired (rep).
+//  - If the amount is unreadable but the line ends in "qty rate" ("Ambur Biryani 3 110") we calculate it (est).
+//  - Loose pass: for bills without decimals ("tea 20"), accept a whole number at the very end of the line.
+function pickLineAmount(nums, loose, decBill){
+  let pool = nums.filter(n => n.dec || n.cur);
+  if(!pool.length){
+    const ints = nums.filter(n => !n.dec && !n.cur && !n.wt);
+    // The scanner sometimes loses decimal points: "... 3000 3000" should be 30.00 30.00. Only trusted when the rest of
+    // the bill uses decimals and the last two columns (price, amount) are identical.
+    if(decBill && ints.length >= 2){
+      const a = ints[ints.length-2], b = ints[ints.length-1];
+      if(b.idx === a.idx + 1 && a.v === b.v && String(b.v).length >= 3) return { v: b.v/100, idx: b.idx, rep: true };
+    }
+    if(ints.length === 2 && ints[1].idx === ints[0].idx + 1 && ints[0].v >= 1 && ints[0].v <= 50 && ints[0].v === Math.floor(ints[0].v) && ints[1].v >= 1)
+      return { v: ints[0].v * ints[1].v, idx: ints[1].idx, est: true };
+    if(loose){
+      const lastNum = nums[nums.length-1];
+      if(lastNum && lastNum.last && !lastNum.wt) pool = [lastNum];
+    }
+  }
+  if(!pool.length) return null;
+  for(let k=pool.length-1; k>=0; k--){
+    const z = pool[k];
+    const earlier = nums.filter(n => n.idx < z.idx);
+    for(let a=0; a<earlier.length; a++) for(let b=a+1; b<earlier.length; b++){
+      const c = earlier[a].v * earlier[b].v, diff = Math.abs(c - z.v);
+      if(diff <= Math.max(0.05, z.v*0.01)){
+        if(z.dd === 1 && diff > 0.005 && diff < 0.1) return { ...z, v: Math.round(c*100)/100, rep: true };
+        return z;
+      }
+    }
+  }
+  return pool[pool.length-1];
+}
+
+// Step 3: which lines are NOT items. These are skipped (never a hard stop), so nothing after them is lost.
+const SKIP_LINE_RE = /\b(cgst|sgst|igst|gst|gstin|cess|vat|tax|taxable|discount|disc|saved|savings|round(?:ing)?\s*off|sub\s*total|total|gross|net|payable|balance|change|cash|card|upi|paid|received|tender(?:ed)?|qty|quantity|no\.?\s*of\s*items?|items?|customer|s\.?man|invoice|bill\s*no|fssai|hsn|phone|tel|mob(?:ile)?|thank|visit|points?|exempt)\b|\bro-/i;
+const HEADER_RE = /\b(item\s*name|description|rate|price|amount|mrp|wt\/?\s*qty)\b/i;
+const NOISE_LINE_RE = /\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{1,2}:\d{2}|\d{8,}/;
+// Lines that mark the real end of the bill. Anything below them is footer, tax tables, etc.
+const FINAL_RE = /\b(grand\s*total|net\s*(?:amount|payable|total)|amount\s*(?:payable|due)|total\s*payable|bill\s*(?:amount|total)|round(?:ing)?\s*off|balance\s*(?:due|amount))\b/i;
+const letterCount = s => s.replace(/[^a-z]/gi, '').length;
+
+function parseReceiptLines(lines, loose){
+  const items = [];
+  const decBill = lines.filter(l => amountsInLine(l).filter(n => n.dec).length >= 2).length >= 3;   // does this bill print decimals?
+  let pending = null;   // an item name that sat alone on the line directly above (name on one line, numbers on the next)
+  for(const line of lines){
+    if(FINAL_RE.test(line) && items.length) break;
+    // A TOTAL / GROSS line whose amount is close to what the items add up to marks the end of the items,
+    // even if one item was missed. Anything below it ("Saved 6.00", footers) is not an item.
+    if(items.length && /\b(total|gross)\b/i.test(line) && !/\b(sub\s*total|qty|quantity|items?|tax|taxable|gst|cgst|sgst|igst|cess|saved|discount)\b/i.test(line)){
+      const tn = amountsInLine(line).filter(n => !n.wt && n.v > 0);
+      if(tn.length){
+        const tv = tn[tn.length-1].v, run = items.reduce((m, i) => m + i.price, 0);
+        if(tv >= run*0.7 && tv <= run*1.3) break;
+      }
+    }
+    if(SKIP_LINE_RE.test(line) || HEADER_RE.test(line) || NOISE_LINE_RE.test(line)){ pending = null; continue; }
+    const nums = amountsInLine(line);
+    const hit = pickLineAmount(nums, loose, decBill);
+    const toks = nums.toks;
+    if(!hit){
+      pending = letterCount(line) >= 3 ? cleanItemName(line.replace(/\b(?:rs|inr)\b\.?/gi, ' ').replace(/₹/g, ' ')) : null;
+      continue;
+    }
+    const prevName = pending; pending = null;
+    if(!(hit.v > 0 && hit.v < 200000)) continue;
+    // drop OCR garbage after the amount ("... 3 110 Uh] pe ~") but keep any digits-containing columns
+    let end = toks.length;
+    while(end > hit.idx + 1 && !/\d/.test(toks[end-1]) && letterCount(toks[end-1]) <= 3) end--;
+    let name = cleanItemName(toks.slice(0, end).join(' ').replace(/\b(?:rs|inr)\b\.?/gi, ' ').replace(/₹/g, ' '));
+    if(letterCount(name) < 3 && prevName) name = prevName;
+    if(letterCount(name) < (hit.est ? 3 : 2)) continue;   // no real name: tax table or stray numbers, not an item
+    items.push({ name, price: hit.v, est: !!hit.est, rep: !!hit.rep });
+  }
+  return items;
+}
+
+// Step 4: find the bill's total (used as a safety check and as a fallback).
+//  value    - the best guess for the grand total (GRAND TOTAL / NET AMOUNT first, then TOTAL / GROSS, last one wins)
+//  all      - every amount that appears on a TOTAL / GROSS / BALANCE style line (used to spot where the items end)
+//  guess    - true when there was no such line and we only picked the biggest amount in the lower half
+// "floor" lets us ignore totals smaller than the biggest item (they are misreads, e.g. "Total 40" for 460).
+function findReceiptTotal(lines, floor){
+  floor = floor || 0;
+  const rank3 = /\b(grand\s*total|net\s*(?:amount|payable|total)|amount\s*(?:payable|due)|total\s*payable|bill\s*(?:amount|total)|balance\s*(?:due|amount))\b/i;
+  const rank2 = /\b(total|net|payable|gross)\b/i;
+  const notTotal = /\b(sub\s*total|qty|quantity|items?|tax|taxable|gst|cgst|sgst|igst|cess|saved|discount|round(?:ing)?\s*off)\b/i;
+  const isCand = /\b(total|gross|net|payable|balance|grand)\b/i;
+  const ok = n => n.v > 0 && n.v < 200000 && !n.wt && n.v >= floor;
+  let best = null; const all = [];
+  lines.forEach((l, i) => {
+    let nums = amountsInLine(l).filter(ok);
+    // OCR sometimes puts the number on the next line
+    if(!nums.length && isCand.test(l) && lines[i+1] && !/[a-z]{3}/i.test(lines[i+1])) nums = amountsInLine(lines[i+1]).filter(ok);
+    if(!nums.length) return;
+    const value = nums[nums.length-1].v;
+    if(isCand.test(l) && !/\b(qty|quantity|items?)\b/i.test(l)) all.push(value);
+    const rank = rank3.test(l) ? 3 : (rank2.test(l) && !notTotal.test(l)) ? 2 : 0;
+    if(rank && (!best || rank >= best.rank)) best = { value, rank, guess: false };
+  });
+  if(best) return { ...best, all };
+  let max = 0;
+  for(let i=Math.floor(lines.length/2); i<lines.length; i++){
+    const l = lines[i];
+    if(NOISE_LINE_RE.test(l) || /\b(cash|card|upi|paid|received|tender(?:ed)?|change|balance)\b/i.test(l)) continue;
+    for(const n of amountsInLine(l)) if(n.dec && n.v < 200000 && n.v > max && n.v >= floor) max = n.v;
+  }
+  return max > 0 ? { value: max, rank: 0, guess: true, all } : null;
+}
+
+// Step 5: cut off junk below the real end of the items. If the running sum of the items reaches a total
+// printed on the bill, anything after that point (like "Saved 6.00") is not an item.
+function trimToTotal(items, totals){
+  let run = 0;
+  for(let k=0; k<items.length; k++){
+    run += items[k].price;
+    for(const t of totals) if(Math.abs(run - t) <= Math.max(0.5, t*0.002)) return items.slice(0, k+1);
+  }
+  return items;
+}
+
 document.getElementById('fileInput').addEventListener('change', async (ev)=>{
   const file = ev.target.files[0]; if(!file) return;
   const statusEl = document.getElementById('ocrStatus');
+  const rawEl = document.getElementById('ocrRaw');
   document.getElementById('ocrResults').innerHTML='';
+  if(rawEl) rawEl.textContent = '';
   statusEl.className="status"; statusEl.textContent="Reading receipt… (10-30s)";
   try{
-    const { data } = await Tesseract.recognize(file, 'eng', { logger:m=>{ if(m.status && m.progress!=null) statusEl.textContent = `${m.status}… ${Math.round(m.progress*100)}%`; } });
+    const prepared = await preprocessReceiptImage(file);
+    const { data } = await Tesseract.recognize(prepared, 'eng', { logger:m=>{ if(m.status && m.progress!=null) statusEl.textContent = `${m.status}… ${Math.round(m.progress*100)}%`; } });
+    if(rawEl) rawEl.textContent = data.text;   // lets you see exactly what the scanner read
     const lines = data.text.split('\n').map(l=>l.trim()).filter(Boolean);
-    const STOP_RE = /\b(no of item|total qty|total\b|gross\b|saved\b|discount\b|received\b|cess\b|customer|s\.?man|ro-|balance\b)/i;
-    const rawItems = [];
-    for(const line of lines){
-      if(STOP_RE.test(line)) break;
-      const nums = line.match(/\d{1,6}\.\d{2}/g);
-      if(!nums || nums.length===0) continue;
-      const price = parseFloat(nums[nums.length-1]);
-      if(!(price>0 && price<200000)) continue;
-      let name = cleanItemName(line);
-      if(!name || name.length<2) name = "Item";
-      rawItems.push({name, price});
+    let loose = false;
+    let rawItems = parseReceiptLines(lines, false);
+    if(rawItems.length === 0){ rawItems = parseReceiptLines(lines, true); loose = rawItems.length > 0; }
+    const maxPrice = rawItems.reduce((m,i)=>Math.max(m, i.price), 0);
+    let total = findReceiptTotal(lines, maxPrice);
+    if(total) rawItems = trimToTotal(rawItems, total.all);
+    // No clear total line? If a lone amount on the bill equals what the items add up to, that is the total.
+    const sumNow = rawItems.reduce((s,i)=>s+i.price, 0);
+    const tolOf = t => Math.max(0.5, t*0.002);
+    if(rawItems.length && (!total || total.guess)){
+      for(const l of lines){
+        if(/[a-z]{3}/i.test(l)) continue;
+        const hit = amountsInLine(l).find(n => n.dec && Math.abs(n.v - sumNow) <= tolOf(sumNow));
+        if(hit){ total = { value: hit.v, rank: 1, guess: false, all: [hit.v] }; break; }
+      }
+    }
+    let usedTotalOnly = false;
+    if(rawItems.length === 0 && total){
+      rawItems = [{ name: 'Receipt total', price: total.value }];
+      usedTotalOnly = true;
     }
     if(rawItems.length===0){ statusEl.textContent="Couldn't detect line items — try a clearer photo or Quick Add."; statusEl.className="status err"; return; }
     statusEl.textContent = `Detected ${rawItems.length} item(s). Categorizing…`;
     const parsed = [];
     for(const it of rawItems){ const {category, mode} = await classify(it.name); parsed.push({...it, category, aiMode: mode}); }
-    statusEl.textContent = `Detected ${parsed.length} item(s). Review before adding.`;
+    // Safety check: do the items add up to the bill's own total?
+    let note = '', warn = false;
+    if(usedTotalOnly){
+      note = total.guess ? ' Couldn\'t find individual items, so this is a guess at the bill total. Please check it.'
+                         : ' Couldn\'t read individual items, so only the bill total is shown. Edit it if needed.';
+      warn = true;
+    }else if(total){
+      const sum = parsed.reduce((s,p)=>s+p.price, 0);
+      if(Math.abs(sum - total.value) <= Math.max(1, total.value*0.005)) note = ` ✓ Items add up to the bill total (₹${total.value.toFixed(2)}).`;
+      else if(!total.guess){ note = ` ⚠ Items add up to ₹${sum.toFixed(2)} but the bill total reads ₹${total.value.toFixed(2)}. A discount, tax added at the bottom, or a misread amount? Check before adding.`; warn = true; }
+    }
+    const nEst = parsed.filter(p=>p.est).length, nRep = parsed.filter(p=>p.rep).length;
+    if(nEst) note += ` ${nEst} amount${nEst>1?'s were':' was'} calculated from qty × rate because the printed amount was unreadable.`;
+    if(nRep) note += ` ${nRep} amount${nRep>1?'s were':' was'} corrected from the bill's own columns (a lost digit or decimal point).`;
+    if(loose) note += ' Amounts had no decimals, so double-check them.';
+    statusEl.textContent = `Detected ${parsed.length} item(s). Review before adding.${note}`;
+    if(warn) statusEl.className = "status err";
     renderEditableResults('ocrResults', parsed, 'receipt');
   }catch(err){ console.error(err); statusEl.textContent="Something went wrong reading that image."; statusEl.className="status err"; }
 });
