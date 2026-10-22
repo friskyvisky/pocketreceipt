@@ -522,8 +522,13 @@ function pickLineAmount(nums, loose, decBill){
       const a = ints[ints.length-2], b = ints[ints.length-1];
       if(b.idx === a.idx + 1 && a.v === b.v && String(b.v).length >= 3) return { v: b.v/100, idx: b.idx, rep: true };
     }
-    if(ints.length === 2 && ints[1].idx === ints[0].idx + 1 && ints[0].v >= 1 && ints[0].v <= 50 && ints[0].v === Math.floor(ints[0].v) && ints[1].v >= 1)
-      return { v: ints[0].v * ints[1].v, idx: ints[1].idx, est: true };
+    // Only when a plain word sits right before the qty ("Biryani 3 110"), never for years/dates/codes ("Oct 21 2026", "R8693K 1 1").
+    if(ints.length === 2 && ints[1].idx === ints[0].idx + 1 && ints[0].v >= 1 && ints[0].v <= 50 && ints[0].v === Math.floor(ints[0].v) && ints[1].v >= 5){
+      const prevTok = (nums.toks || [])[ints[0].idx - 1] || '';
+      const isYear = ints[1].v >= 1900 && ints[1].v <= 2100;
+      if(/^[A-Za-z][A-Za-z'.\-]{2,}$/.test(prevTok) && !isYear && ints[0].v * ints[1].v <= 50000)
+        return { v: ints[0].v * ints[1].v, idx: ints[1].idx, est: true };
+    }
     if(loose){
       const lastNum = nums[nums.length-1];
       if(lastNum && lastNum.last && !lastNum.wt) pool = [lastNum];
@@ -547,7 +552,7 @@ function pickLineAmount(nums, loose, decBill){
 // Step 3: which lines are NOT items. These are skipped (never a hard stop), so nothing after them is lost.
 const SKIP_LINE_RE = /\b(cgst|sgst|igst|gst|gstin|cess|vat|tax|taxable|discount|disc|saved|savings|round(?:ing)?\s*off|sub\s*total|total|gross|net|payable|balance|change|cash|card|upi|paid|received|tender(?:ed)?|qty|quantity|no\.?\s*of\s*items?|items?|customer|s\.?man|invoice|bill\s*no|fssai|hsn|phone|tel|mob(?:ile)?|thank|visit|points?|exempt)\b|\bro-/i;
 const HEADER_RE = /\b(item\s*name|description|rate|price|amount|mrp|wt\/?\s*qty)\b/i;
-const NOISE_LINE_RE = /\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{1,2}:\d{2}|\d{8,}/;
+const NOISE_LINE_RE = /\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{1,2}:\d{2}|\d{8,}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b/i;
 // Lines that mark the real end of the bill. Anything below them is footer, tax tables, etc.
 const FINAL_RE = /\b(grand\s*total|net\s*(?:amount|payable|total)|amount\s*(?:payable|due)|total\s*payable|bill\s*(?:amount|total)|round(?:ing)?\s*off|balance\s*(?:due|amount))\b/i;
 const letterCount = s => s.replace(/[^a-z]/gi, '').length;
@@ -632,6 +637,31 @@ function trimToTotal(items, totals){
   return items;
 }
 
+// Step 6: one misread digit, caught by the bill's own total.
+// If the items don't add up to a total that is printed on at least two lines, and changing exactly ONE digit of
+// exactly ONE item makes them add up, that item is almost certainly a misread (85.40 read instead of 95.40).
+// We don't touch it when a printed discount/saving explains the gap, or when more than one item could be the culprit.
+function repairOneDigit(items, total, lines){
+  if(!total || total.guess || items.length === 0) return null;
+  const sum = items.reduce((s, i) => s + i.price, 0);
+  const diff = Math.round((total.value - sum) * 100) / 100;
+  if(Math.abs(diff) < 0.5) return null;
+  const seen = lines.filter(l => amountsInLine(l).some(n => Math.abs(n.v - total.value) < 0.005)).length;
+  if(seen < 2) return null;
+  if(lines.some(l => /\b(saved|discount|disc|savings)\b/i.test(l) && amountsInLine(l).some(n => Math.abs(n.v - Math.abs(diff)) < 0.005))) return null;
+  const cands = [];
+  items.forEach((it, i) => {
+    if(it.est) return;
+    const np = Math.round((it.price + diff) * 100) / 100;
+    if(np <= 0) return;
+    const a = it.price.toFixed(2), b = np.toFixed(2);
+    if(a.length !== b.length) return;
+    let d = 0; for(let k=0; k<a.length; k++) if(a[k] !== b[k]) d++;
+    if(d === 1) cands.push({ index: i, from: it.price, to: np });
+  });
+  return cands.length === 1 ? cands[0] : null;
+}
+
 document.getElementById('fileInput').addEventListener('change', async (ev)=>{
   const file = ev.target.files[0]; if(!file) return;
   const statusEl = document.getElementById('ocrStatus');
@@ -660,6 +690,26 @@ document.getElementById('fileInput').addEventListener('change', async (ev)=>{
         if(hit){ total = { value: hit.v, rank: 1, guess: false, all: [hit.v] }; break; }
       }
     }
+    let fixNote = '';
+    if(rawItems.length && total && !total.guess){
+      const fx = repairOneDigit(rawItems, total, lines);
+      if(fx){
+        fixNote = ` "${rawItems[fx.index].name}" looked misread (${fx.from.toFixed(2)}), so it was changed to ${fx.to.toFixed(2)} to match the bill total. Please check it.`;
+        rawItems[fx.index] = { ...rawItems[fx.index], price: fx.to };
+      }
+    }
+    let taxNote = '';
+    if(rawItems.length && total && !total.guess){
+      const sum = rawItems.reduce((s, i) => s + i.price, 0);
+      const subs = [];
+      for(const l of lines) if(/\bsub\s*total\b/i.test(l)){ const ns = amountsInLine(l).filter(n => n.v > 0 && !n.wt); if(ns.length) subs.push(ns[ns.length-1].v); }
+      const gap = Math.round((total.value - sum) * 100) / 100;
+      // Items match the printed Sub Total, and the bill total is a bit higher: that gap is tax / service charge.
+      if(subs.some(v => Math.abs(v - sum) <= tolOf(sum)) && gap >= 0.5 && gap / sum <= 0.35){
+        rawItems.push({ name: 'Taxes & charges', price: gap });
+        taxNote = ` Added "Taxes & charges" (₹${gap.toFixed(2)}): the bill adds tax below the items, so the total now matches what you paid.`;
+      }
+    }
     let usedTotalOnly = false;
     if(rawItems.length === 0 && total){
       rawItems = [{ name: 'Receipt total', price: total.value }];
@@ -680,6 +730,7 @@ document.getElementById('fileInput').addEventListener('change', async (ev)=>{
       if(Math.abs(sum - total.value) <= Math.max(1, total.value*0.005)) note = ` ✓ Items add up to the bill total (₹${total.value.toFixed(2)}).`;
       else if(!total.guess){ note = ` ⚠ Items add up to ₹${sum.toFixed(2)} but the bill total reads ₹${total.value.toFixed(2)}. A discount, tax added at the bottom, or a misread amount? Check before adding.`; warn = true; }
     }
+    note += fixNote + taxNote;
     const nEst = parsed.filter(p=>p.est).length, nRep = parsed.filter(p=>p.rep).length;
     if(nEst) note += ` ${nEst} amount${nEst>1?'s were':' was'} calculated from qty × rate because the printed amount was unreadable.`;
     if(nRep) note += ` ${nRep} amount${nRep>1?'s were':' was'} corrected from the bill's own columns (a lost digit or decimal point).`;
